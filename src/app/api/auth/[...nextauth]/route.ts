@@ -1,44 +1,115 @@
-// imports third party library
-import NextAuth, { AuthOptions, TokenSet } from 'next-auth';
-import { JWT } from 'next-auth/jwt';
+import NextAuth, { TokenSet } from 'next-auth';
+import CredentialsProvider from 'next-auth/providers/credentials';
 import KeycloakProvider from 'next-auth/providers/keycloak';
+import { JWT } from 'next-auth/jwt';
+import { Session, User } from 'next-auth';
+
+interface CustomUser extends User {
+  id: string;
+  name: string;
+  idToken: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+}
 
 function requestRefreshOfAccessToken(token: JWT) {
-  if (!token.refreshToken || typeof token.refreshToken !== 'string')
+  if (!token.refreshToken || typeof token.refreshToken !== 'string') {
     throw new Error('Refresh token is missing or invalid');
+  }
+
+  const clientId = process.env.KEYCLOAK_CLIENT_ID;
+  const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    throw new Error('Client ID or Client Secret is missing');
+  }
 
   return fetch(`${process.env.KEYCLOAK_ISSUER}/protocol/openid-connect/token`, {
+    method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: process.env.KEYCLOAK_CLIENT_ID,
-      client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
       grant_type: 'refresh_token',
-      refresh_token: token.refreshToken!,
-    }),
-    method: 'POST',
+      refresh_token: token.refreshToken,
+    }).toString(),
     cache: 'no-store',
   });
 }
 
-export const authOptions: AuthOptions = {
+export const authOptions = {
   providers: [
     KeycloakProvider({
-      clientId: process.env.KEYCLOAK_CLIENT_ID,
-      clientSecret: process.env.KEYCLOAK_CLIENT_SECRET,
+      clientId: process.env.KEYCLOAK_CLIENT_ID as string,
+      clientSecret: process.env.KEYCLOAK_CLIENT_SECRET as string,
       issuer: process.env.KEYCLOAK_ISSUER,
     }),
+    CredentialsProvider({
+      name: 'Credentials',
+      credentials: {
+        username: { label: 'Usuario', type: 'text' },
+        password: { label: 'Contraseña', type: 'password' },
+      },
+      async authorize(credentials) {
+        if (
+          !credentials ||
+          !process.env.KEYCLOAK_CLIENT_ID ||
+          !process.env.KEYCLOAK_CLIENT_SECRET
+        ) {
+          console.error('The required environment variables are not defined.');
+          return null;
+        }
+
+        try {
+          const res = await fetch(
+            `${process.env.KEYCLOAK_ISSUER}/protocol/openid-connect/token`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({
+                client_id: process.env.KEYCLOAK_CLIENT_ID,
+                client_secret: process.env.KEYCLOAK_CLIENT_SECRET,
+                grant_type: 'password',
+                username: credentials.username,
+                password: credentials.password,
+                scope: 'openid',
+              }).toString(),
+            }
+          );
+
+          const data = await res.json();
+
+          if (res.ok && data.access_token) {
+            return {
+              id: credentials.username,
+              name: credentials.username,
+              idToken: data.id_token || '',
+              accessToken: data.access_token,
+              refreshToken: data.refresh_token,
+              expiresIn: data.expires_in,
+            } as CustomUser;
+          } else {
+            console.error('Authentication error:', data);
+            return null;
+          }
+        } catch (error) {
+          console.error('Error in the request to Keycloak:', error);
+          return null;
+        }
+      },
+    }),
   ],
-  session: {
-    maxAge: 60 * 30,
-  },
+  secret: process.env.NEXTAUTH_SECRET,
   callbacks: {
-    async jwt({ token, account }) {
-      if (account) {
-        token.idToken = account.id_token;
-        token.accessToken = account.access_token;
-        token.refreshToken = account.refresh_token;
-        token.expiresAt = account.expires_at;
-        return token;
+    async jwt({ token, user }: { token: JWT; user: User }) {
+      if (user) {
+        token.idToken = user.id;
+        token.idToken = user.name;
+        token.idToken = user.idToken;
+        token.accessToken = user.accessToken;
+        token.refreshToken = user.refreshToken;
+        token.expiresIn = user.expiresIn;
       }
 
       if (
@@ -71,6 +142,16 @@ export const authOptions: AuthOptions = {
         }
       }
     },
+    async session({ session, token }: { session: Session; token: JWT }) {
+      session.accessToken = token.accessToken as string;
+      session.refreshToken = token.refreshToken as string;
+      session.expiresIn = token.expiresIn as number;
+
+      return session;
+    },
+  },
+  pages: {
+    signIn: '/',
   },
 };
 
